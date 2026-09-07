@@ -216,11 +216,14 @@ pub const Instant = struct {
         const days = daysSinceEpoch(adjusted.timestamp);
         const date = civilFromDays(days);
 
-        var seconds = @mod(adjusted.timestamp, s_per_day);
-        const hours = @divFloor(seconds, s_per_hour);
-        seconds -= hours * s_per_hour;
-        const minutes = @divFloor(seconds, s_per_min);
-        seconds -= minutes * s_per_min;
+        // Normalize before narrowing so pre-epoch timestamps stay nonnegative.
+        const day_seconds: u32 = @intCast(@mod(adjusted.timestamp, s_per_day));
+        // Independent divisions shorten the H:M:S dependency chain.
+        // https://www.benjoffe.com/fast-time-of-day
+        const total_minutes = day_seconds / s_per_min;
+        const hours = day_seconds / s_per_hour;
+        const minutes = total_minutes - hours * 60;
+        const seconds = day_seconds - total_minutes * s_per_min;
 
         // get the nanoseconds from the original timestamp
         var nanos = @mod(self.timestamp, ns_per_s);
@@ -294,6 +297,32 @@ test "instant" {
     const time = original.time();
     const round_trip = time.instant();
     try std.testing.expectEqual(original.timestamp, round_trip.timestamp);
+}
+
+test "Instant.time decomposes every second around the epoch" {
+    for ([_]Seconds{ -19800, 0, 19800 }) |offset| {
+        const zone: TimeZone = .{ .fixed = .{ .name = "test", .offset = offset, .is_dst = false } };
+        for ([_]Seconds{ -1, 0 }) |day| {
+            for (0..s_per_day) |s| {
+                const local_seconds = day * s_per_day + @as(Seconds, @intCast(s));
+                const original = instant(.{ .unix_nano = @as(Nanoseconds, local_seconds - offset) * ns_per_s + ns_per_s - 1 }, &zone);
+                const expected: Time = .{
+                    .year = if (day == -1) 1969 else 1970,
+                    .month = if (day == -1) .dec else .jan,
+                    .day = if (day == -1) 31 else 1,
+                    .hour = @intCast(s / s_per_hour),
+                    .minute = @intCast((s / s_per_min) % 60),
+                    .second = @intCast(s % s_per_min),
+                    .millisecond = 999,
+                    .microsecond = 999,
+                    .nanosecond = 999,
+                    .offset = @intCast(offset),
+                    .designation = "test",
+                };
+                try std.testing.expectEqualDeep(expected, original.time());
+            }
+        }
+    }
 }
 
 /// Creates a new Instant by parsing text.
